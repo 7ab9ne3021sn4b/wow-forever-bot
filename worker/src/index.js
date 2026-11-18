@@ -156,36 +156,89 @@ async function priceCommand(options, env) {
   const entry = shard?.[id];
   if (!entry) return reply(`**${name}** has no buyout listings in the latest scan.`);
 
-  const onlyLabelled = Object.keys(HOUSE_LABELS).length > 0;
+  const labelled = Object.keys(HOUSE_LABELS).length > 0;
   const faction = options.faction;
   const rows = Object.entries(entry)
     .map(([houseId, [min, market, units, listings]]) => {
       const houseName = meta.houses?.[houseId] ?? "Auction House";
-      return { houseId, houseName, label: HOUSE_LABELS[houseId] ?? `${houseName} #${houseId}`, min, market, units, listings };
+      const side = factionOf(houseName);
+      return { houseId, side, label: HOUSE_LABELS[houseId] ?? `${capitalise(side)} #${houseId}`, min, market, units, listings };
     })
-    .filter((r) => !onlyLabelled || HOUSE_LABELS[r.houseId])
-    .filter((r) => !faction || `${r.label} ${r.houseName}`.toLowerCase().includes(faction))
-    .sort((a, b) => a.label.localeCompare(b.label));
+    .filter((r) => !labelled || HOUSE_LABELS[r.houseId])
+    .filter((r) => !faction || r.side === faction)
+    .sort((a, b) => FACTION_ORDER.indexOf(a.side) - FACTION_ORDER.indexOf(b.side) || a.min - b.min);
 
   if (!rows.length) return reply(`**${name}** has no matching listings in the latest scan.`);
 
-  const lines = rows.map(
-    (r) => `**${r.label}**\nmin **${gold(r.min)}** · market ${gold(r.market)} · ${r.units.toLocaleString("en-GB")} up (${r.listings} listings)`
-  );
-  const scanned = `Scanned <t:${Math.floor(meta.updated / 1000)}:R>`;
+  const info = await withTimeout(itemInfo(env, id).catch(() => null), 1500);
+  const cheapest = rows.reduce((best, r) => (r.min < best.min ? r : best));
+
+  let fields;
+  if (labelled) {
+    // Your own houses: one column each.
+    fields = rows.map((r) => ({
+      name: `${FACTION_ICON[r.side]} ${r.label}`,
+      value: `**${gold(r.min)}**\nmarket ${gold(r.market)}\n${count(r.units)} listed`,
+      inline: true,
+    }));
+  } else {
+    // Not labelled yet: one compact block per faction.
+    const groups = {};
+    for (const r of rows) (groups[r.side] ??= []).push(r);
+    fields = Object.entries(groups).map(([side, list]) => ({
+      name: `${FACTION_ICON[side]} ${capitalise(side)}`,
+      value: list.map((r) => `\`#${r.houseId}\` **${gold(r.min)}** · ${count(r.units)} listed`).join("\n").slice(0, 1024),
+      inline: false,
+    }));
+  }
+
   return {
     type: 4,
     data: {
       embeds: [
         {
           title: name,
-          description: `${lines.join("\n\n")}\n\n${scanned} · item ID ${id}`.slice(0, 4000),
-          color: 0xf2b84b,
-          footer: { text: "Market = average of the cheapest 15% of units" },
+          color: QUALITY_COLORS[info?.quality] ?? 0xf2b84b,
+          thumbnail: info?.icon ? { url: info.icon } : undefined,
+          description: [info?.kind, `Cheapest: **${gold(cheapest.min)}** · ${cheapest.label}`].filter(Boolean).join("\n"),
+          fields: fields.slice(0, 25),
+          footer: { text: `Item ${id} · market = avg of cheapest 15% · scanned` },
+          timestamp: new Date(meta.updated).toISOString(),
         },
       ],
     },
   };
+}
+
+const QUALITY_COLORS = {
+  POOR: 0x9d9d9d, COMMON: 0xffffff, UNCOMMON: 0x1eff00, RARE: 0x0070dd,
+  EPIC: 0xa335ee, LEGENDARY: 0xff8000, ARTIFACT: 0xe6cc80, HEIRLOOM: 0x00ccff,
+};
+const FACTION_ORDER = ["alliance", "horde", "blackwater", "other"];
+const FACTION_ICON = { alliance: "🔵", horde: "🔴", blackwater: "🏴‍☠️", other: "🏛️" };
+
+function factionOf(houseName) {
+  const n = houseName.toLowerCase();
+  return n.includes("alliance") ? "alliance" : n.includes("horde") ? "horde" : n.includes("blackwater") ? "blackwater" : "other";
+}
+const capitalise = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+const count = (n) => n.toLocaleString("en-GB");
+const withTimeout = (promise, ms) => Promise.race([promise, new Promise((r) => setTimeout(() => r(null), ms))]);
+
+// Item quality, type and icon from Blizzard (Forever data first, Classic Era as fallback).
+async function itemInfo(env, id) {
+  const token = await blizzardToken(env);
+  const get = (path, ns) =>
+    fetch(`${API}${path}?namespace=${ns}&locale=en_GB`, { headers: { Authorization: `Bearer ${token}` } })
+      .then((r) => (r.ok ? r.json() : null))
+      .catch(() => null);
+  for (const ns of ["static-forever-eu", "static-classic1x-eu"]) {
+    const [item, media] = await Promise.all([get(`/data/wow/item/${id}`, ns), get(`/data/wow/media/item/${id}`, ns)]);
+    if (!item && !media) continue;
+    const kind = [...new Set([item?.item_class?.name, item?.item_subclass?.name].filter(Boolean))].join(" · ");
+    return { quality: item?.quality?.type, kind, icon: media?.assets?.find((a) => a.key === "icon")?.value };
+  }
+  return null;
 }
 
 // ---------- Blizzard API ----------
