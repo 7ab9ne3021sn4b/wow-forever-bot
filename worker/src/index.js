@@ -1,6 +1,9 @@
-// WoW Forever EU bot — runs on a free Cloudflare Worker.
-//  - /price <item>  : latest auction house prices (data prepared hourly by GitHub Actions)
-//  - /rulesets      : raw ruleset status from Blizzard's API (handy for checking what it reports)
+// Auction House — WoW Forever EU bot, running on a free Cloudflare Worker.
+//  - /price <item>  : latest auction house prices (data prepared hourly by GitHub Actions)    [everyone]
+//  - /sticky set    : write the sticky message for this channel (opens a text box)            [admins]
+//  - /sticky remove : turn the sticky message off                                             [admins]
+//  - /rulesets      : raw ruleset status from Blizzard's API                                  [admins]
+//  - every minute   : keeps the sticky message at the bottom of its channel
 //  - every 2 minutes: checks the EU Normal + PvP rulesets and posts to a Discord webhook when anything changes
 
 import HOUSE_LABELS from "./house-labels.json";
@@ -11,7 +14,7 @@ const RULESETS = { 2: "Normal", 1: "PvP" };
 const SHARDS = 16; // must match scripts/build-prices.mjs
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     if (request.method !== "POST") return new Response("WoW Forever bot is running.");
 
     const signature = request.headers.get("X-Signature-Ed25519");
@@ -32,9 +35,17 @@ export default {
       }
     }
 
+    if (interaction.type === 5) {
+      try {
+        return json(await handleModal(interaction, env, ctx));
+      } catch (e) {
+        return json(reply(`Something went wrong: ${e.message}`, true));
+      }
+    }
+
     if (interaction.type === 2) {
       try {
-        return json(await handleCommand(interaction, env));
+        return json(await handleCommand(interaction, env, ctx));
       } catch (e) {
         return json(reply(`Something went wrong: ${e.message}`, true));
       }
@@ -44,7 +55,8 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(checkRulesets(env));
+    ctx.waitUntil(refreshSticky(env).catch((e) => console.log(`Sticky: ${e.message}`)));
+    if (new Date(event.scheduledTime).getUTCMinutes() % 2 === 0) ctx.waitUntil(checkRulesets(env));
   },
 };
 
@@ -76,13 +88,15 @@ async function verifyDiscord(publicKey, signature, message) {
   return false;
 }
 
-async function handleCommand(interaction, env) {
+async function handleCommand(interaction, env, ctx) {
   const options = Object.fromEntries((interaction.data.options || []).map((o) => [o.name, o.value]));
   switch (interaction.data.name) {
     case "price":
       return priceCommand(options, env);
     case "rulesets":
       return rulesetsCommand(env);
+    case "sticky":
+      return stickyCommand(interaction, env, ctx);
     default:
       return reply("Unknown command.", true);
   }
@@ -187,7 +201,7 @@ async function priceCommand(options, env) {
     rows.forEach((r, i) => {
       fields.push({
         name: `${FACTION_ICON[r.side]} ${r.label}`,
-        value: `**${money(r.min)}**\nmarket ${money(r.market)}\n${count(r.units)} listed`,
+        value: `**${money(r.min)}**\navg price ${money(r.market)}\n${count(r.units)} listed`,
         inline: true,
       });
       if (i % 2 === 1) fields.push({ name: "​", value: "​", inline: true }); // spacer keeps 2 per row
@@ -210,9 +224,9 @@ async function priceCommand(options, env) {
         {
           author: { name, icon_url: info?.icon },
           color: QUALITY_COLORS[info?.quality] ?? 0xf2b84b,
-          description: [info?.kind, `Cheapest: **${money(cheapest.min)}** · ${cheapest.label}`].filter(Boolean).join("\n"),
+          description: `Cheapest: **${money(cheapest.min)}** · ${cheapest.label}`,
           fields: fields.slice(0, 25),
-          footer: { text: `Item ${id} · market = avg of cheapest 15% · scanned` },
+          footer: { text: `Bold = lowest price · avg price = average of the cheapest 15% · item ${id} · scanned` },
           timestamp: new Date(meta.updated).toISOString(),
         },
       ],
@@ -235,7 +249,7 @@ const capitalise = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 const count = (n) => n.toLocaleString("en-GB");
 const withTimeout = (promise, ms) => Promise.race([promise, new Promise((r) => setTimeout(() => r(null), ms))]);
 
-// Item quality, type and icon from Blizzard (Forever data first, Classic Era as fallback).
+// Item quality and icon from Blizzard (Forever data first, Classic Era as fallback).
 async function itemInfo(env, id) {
   const token = await blizzardToken(env);
   const get = (path, ns) =>
@@ -245,8 +259,7 @@ async function itemInfo(env, id) {
   for (const ns of ["static-forever-eu", "static-classic1x-eu"]) {
     const [item, media] = await Promise.all([get(`/data/wow/item/${id}`, ns), get(`/data/wow/media/item/${id}`, ns)]);
     if (!item && !media) continue;
-    const kind = [...new Set([item?.item_class?.name, item?.item_subclass?.name].filter(Boolean))].join(" · ");
-    return { quality: item?.quality?.type, kind, icon: media?.assets?.find((a) => a.key === "icon")?.value };
+    return { quality: item?.quality?.type, icon: media?.assets?.find((a) => a.key === "icon")?.value };
   }
   return null;
 }
@@ -364,4 +377,127 @@ async function postChange(env, label, before, after) {
       ],
     }),
   });
+}
+
+// ---------- Sticky message ----------
+// The sticky text and channel live in KV under "sticky". Every minute the bot looks at the channel's latest
+// messages; if its sticky isn't the newest one (or the text changed), it deletes the old copy and posts it again.
+
+const DISCORD = "https://discord.com/api/v10";
+const STICKY_COLOR = 0xf2b84b;
+let botUserId; // cached per worker instance
+
+async function discord(env, method, path, body) {
+  const res = await fetch(`${DISCORD}${path}`, {
+    method,
+    headers: {
+      Authorization: `Bot ${env.DISCORD_BOT_TOKEN}`,
+      "Content-Type": "application/json",
+      "User-Agent": "DiscordBot (https://github.com, 1.0)",
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok && res.status !== 404) throw new Error(`Discord ${method} ${path}: ${res.status} ${await res.text()}`);
+  return res.status === 204 || res.status === 404 ? null : res.json();
+}
+
+async function myId(env) {
+  botUserId ??= (await discord(env, "GET", "/users/@me")).id;
+  return botUserId;
+}
+
+// A sticky is a plain message from the bot itself: not a /price reply (interaction) and not a webhook alert.
+const isSticky = (m, me) => m.author?.id === me && !m.webhook_id && !m.interaction_metadata && !m.interaction;
+
+async function refreshSticky(env, force = false) {
+  const sticky = await env.KV.get("sticky", { type: "json", cacheTtl: force ? undefined : 60 });
+  if (!sticky?.channelId || !env.DISCORD_BOT_TOKEN) return;
+
+  const me = await myId(env);
+  const messages = (await discord(env, "GET", `/channels/${sticky.channelId}/messages?limit=25`)) ?? [];
+  const mine = messages.filter((m) => isSticky(m, me));
+  const newest = messages[0];
+  const upToDate = newest && isSticky(newest, me) && mine.length === 1 && newest.embeds?.[0]?.description === sticky.text;
+  if (upToDate && !force) return;
+
+  for (const m of mine) await discord(env, "DELETE", `/channels/${sticky.channelId}/messages/${m.id}`);
+  await discord(env, "POST", `/channels/${sticky.channelId}/messages`, {
+    embeds: [{ description: sticky.text, color: STICKY_COLOR }],
+    allowed_mentions: { parse: [] },
+  });
+}
+
+async function stickyCommand(interaction, env, ctx) {
+  const sub = interaction.data.options?.[0]?.name;
+
+  if (sub === "set") {
+    const current = await env.KV.get("sticky", { type: "json" });
+    return {
+      type: 9, // open a text box (modal)
+      data: {
+        custom_id: "sticky_modal",
+        title: "Sticky message for this channel",
+        components: [
+          {
+            type: 1,
+            components: [
+              {
+                type: 4,
+                custom_id: "text",
+                label: "Message (markdown works)",
+                style: 2,
+                max_length: 4000,
+                required: true,
+                value: current?.channelId === interaction.channel_id ? current.text : undefined,
+                placeholder: "How to use the bot: type /price and start typing an item name…",
+              },
+            ],
+          },
+        ],
+      },
+    };
+  }
+
+  if (sub === "remove") {
+    const current = await env.KV.get("sticky", { type: "json" });
+    await env.KV.delete("sticky");
+    if (current?.channelId) {
+      ctx.waitUntil(
+        (async () => {
+          const me = await myId(env);
+          const messages = (await discord(env, "GET", `/channels/${current.channelId}/messages?limit=25`)) ?? [];
+          for (const m of messages.filter((m) => isSticky(m, me))) {
+            await discord(env, "DELETE", `/channels/${current.channelId}/messages/${m.id}`);
+          }
+        })().catch((e) => console.log(e.message))
+      );
+    }
+    return reply("Sticky message removed.", true);
+  }
+
+  return reply("Use `/sticky set` or `/sticky remove`.", true);
+}
+
+async function handleModal(interaction, env, ctx) {
+  if (interaction.data.custom_id !== "sticky_modal") return reply("Unknown form.", true);
+  const text = interaction.data.components?.[0]?.components?.[0]?.value?.trim();
+  if (!text) return reply("The message was empty, nothing saved.", true);
+
+  const previous = await env.KV.get("sticky", { type: "json" });
+  await env.KV.put("sticky", JSON.stringify({ channelId: interaction.channel_id, text }));
+
+  ctx.waitUntil(
+    (async () => {
+      // If the sticky moved to a new channel, clean up the old one first.
+      if (previous?.channelId && previous.channelId !== interaction.channel_id) {
+        const me = await myId(env);
+        const old = (await discord(env, "GET", `/channels/${previous.channelId}/messages?limit=25`)) ?? [];
+        for (const m of old.filter((m) => isSticky(m, me))) {
+          await discord(env, "DELETE", `/channels/${previous.channelId}/messages/${m.id}`);
+        }
+      }
+      await refreshSticky(env, true);
+    })().catch((e) => console.log(`Sticky: ${e.message}`))
+  );
+  return reply("📌 Sticky saved. It's posted now and will stay at the bottom of this channel.", true);
 }
