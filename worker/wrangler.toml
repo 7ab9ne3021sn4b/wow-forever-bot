@@ -1,0 +1,12 @@
+name = "wow-forever-bot"
+main = "src/index.js"
+compatibility_date = "2026-11-01"
+
+# The deploy workflow fills in the real ID from the CF_KV_ID GitHub secret.
+[[kv_namespaces]]
+binding = "KV"
+id = "__KV_ID__"
+
+# Check the EU Normal + PvP rulesets every 2 minutes.
+[triggers]
+crons = ["*/2 * * * *"]
