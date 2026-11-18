@@ -290,7 +290,7 @@ async function postChange(env, label, before, after) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      username: "WoW Forever Watch",
+      username: "Auction House",
       embeds: [
         {
           title,
