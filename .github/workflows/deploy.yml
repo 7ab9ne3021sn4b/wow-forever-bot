@@ -23,8 +23,10 @@ jobs:
             BLIZZ_ID
             BLIZZ_SECRET
             ALERT_WEBHOOK_URL
+            DISCORD_BOT_TOKEN
         env:
           DISCORD_PUBLIC_KEY: ${{ secrets.DISCORD_PUBLIC_KEY }}
           BLIZZ_ID: ${{ secrets.BLIZZ_ID }}
           BLIZZ_SECRET: ${{ secrets.BLIZZ_SECRET }}
           ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
