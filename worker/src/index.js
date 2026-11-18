@@ -166,7 +166,11 @@ async function priceCommand(options, env) {
     })
     .filter((r) => !labelled || HOUSE_LABELS[r.houseId])
     .filter((r) => !faction || r.side === faction)
-    .sort((a, b) => FACTION_ORDER.indexOf(a.side) - FACTION_ORDER.indexOf(b.side) || a.min - b.min);
+    .sort((a, b) =>
+      labelled
+        ? a.label.localeCompare(b.label)
+        : FACTION_ORDER.indexOf(a.side) - FACTION_ORDER.indexOf(b.side) || a.min - b.min
+    );
 
   if (!rows.length) return reply(`**${name}** has no matching listings in the latest scan.`);
 
@@ -175,12 +179,16 @@ async function priceCommand(options, env) {
 
   let fields;
   if (labelled) {
-    // Your own houses: one column each.
-    fields = rows.map((r) => ({
-      name: `${FACTION_ICON[r.side]} ${r.label}`,
-      value: `**${gold(r.min)}**\nmarket ${gold(r.market)}\n${count(r.units)} listed`,
-      inline: true,
-    }));
+    // Your own houses, two per row, sorted by label.
+    fields = [];
+    rows.forEach((r, i) => {
+      fields.push({
+        name: `${FACTION_ICON[r.side]} ${r.label}`,
+        value: `**${gold(r.min)}**\nmarket ${gold(r.market)}\n${count(r.units)} listed`,
+        inline: true,
+      });
+      if (i % 2 === 1) fields.push({ name: "​", value: "​", inline: true }); // spacer keeps 2 per row
+    });
   } else {
     // Not labelled yet: one compact block per faction.
     const groups = {};
