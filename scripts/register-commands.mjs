@@ -1,8 +1,13 @@
-// Registers the bot's slash commands with Discord. Run once (and again if you change the commands)
-// from the "Register Discord commands" workflow on GitHub.
+// Registers the bot's slash commands with Discord. Run from the "Register Discord commands" workflow
+// on GitHub (again whenever the commands change).
+//
+// /price is for everyone. /sticky and /rulesets need the "Manage Server" permission, so regular members
+// don't even see them. You can fine-tune this per role/channel in Server Settings → Integrations → Auction House.
 
 const { DISCORD_APP_ID, DISCORD_BOT_TOKEN, DISCORD_GUILD_ID } = process.env;
 if (!DISCORD_APP_ID || !DISCORD_BOT_TOKEN) throw new Error("Missing DISCORD_APP_ID or DISCORD_BOT_TOKEN secret");
+
+const MANAGE_SERVER = "32";
 
 const commands = [
   {
@@ -24,8 +29,20 @@ const commands = [
     ],
   },
   {
+    name: "sticky",
+    description: "Manage the sticky message that always stays at the bottom of this channel",
+    default_member_permissions: MANAGE_SERVER,
+    dm_permission: false,
+    options: [
+      { type: 1, name: "set", description: "Write or edit the sticky message for this channel" },
+      { type: 1, name: "remove", description: "Turn the sticky message off" },
+    ],
+  },
+  {
     name: "rulesets",
     description: "Show what Blizzard's API currently reports for the EU Normal and PvP rulesets",
+    default_member_permissions: MANAGE_SERVER,
+    dm_permission: false,
   },
 ];
 
