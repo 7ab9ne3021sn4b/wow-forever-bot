@@ -1,0 +1,30 @@
+name: Deploy bot
+
+on:
+  push:
+    branches: [main]
+    paths: ["worker/**"]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fill in KV namespace ID
+        run: sed -i "s/__KV_ID__/${{ secrets.CF_KV_ID }}/" worker/wrangler.toml
+      - uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CF_API_TOKEN }}
+          accountId: ${{ secrets.CF_ACCOUNT_ID }}
+          workingDirectory: worker
+          secrets: |
+            DISCORD_PUBLIC_KEY
+            BLIZZ_ID
+            BLIZZ_SECRET
+            ALERT_WEBHOOK_URL
+        env:
+          DISCORD_PUBLIC_KEY: ${{ secrets.DISCORD_PUBLIC_KEY }}
+          BLIZZ_ID: ${{ secrets.BLIZZ_ID }}
+          BLIZZ_SECRET: ${{ secrets.BLIZZ_SECRET }}
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
