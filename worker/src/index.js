@@ -121,15 +121,16 @@ async function handleAutocomplete(interaction, env) {
 
 // ---------- /price ----------
 
-function gold(copper) {
+function gold(copper, coins) {
   const c = Math.round(copper);
   const g = Math.floor(c / 10000);
   const s = Math.floor((c % 10000) / 100);
   const cc = c % 100;
+  const mark = { g: coins?.gold ?? "g", s: coins?.silver ?? "s", c: coins?.copper ?? "c" };
   const parts = [];
-  if (g) parts.push(`${g.toLocaleString("en-GB")}g`);
-  if (s) parts.push(`${s}s`);
-  if (cc || parts.length === 0) parts.push(`${cc}c`);
+  if (g) parts.push(`${g.toLocaleString("en-GB")}${mark.g}`);
+  if (s) parts.push(`${s}${mark.s}`);
+  if (cc || parts.length === 0) parts.push(`${cc}${mark.c}`);
   return parts.join(" ");
 }
 
@@ -147,10 +148,12 @@ async function priceCommand(options, env) {
     [id, name] = match;
   }
 
-  const [shard, meta] = await Promise.all([
+  const [shard, meta, coins] = await Promise.all([
     env.KV.get(`p:${id % SHARDS}`, { type: "json", cacheTtl: 300 }),
     env.KV.get("meta", { type: "json", cacheTtl: 300 }),
+    env.KV.get("emojis", { type: "json", cacheTtl: 3600 }),
   ]);
+  const money = (copper) => gold(copper, coins);
   if (!meta) return reply("No price data yet. Run the **Update auction prices** workflow on GitHub first.", true);
 
   const entry = shard?.[id];
@@ -184,7 +187,7 @@ async function priceCommand(options, env) {
     rows.forEach((r, i) => {
       fields.push({
         name: `${FACTION_ICON[r.side]} ${r.label}`,
-        value: `**${gold(r.min)}**\nmarket ${gold(r.market)}\n${count(r.units)} listed`,
+        value: `**${money(r.min)}**\nmarket ${money(r.market)}\n${count(r.units)} listed`,
         inline: true,
       });
       if (i % 2 === 1) fields.push({ name: "​", value: "​", inline: true }); // spacer keeps 2 per row
@@ -195,7 +198,7 @@ async function priceCommand(options, env) {
     for (const r of rows) (groups[r.side] ??= []).push(r);
     fields = Object.entries(groups).map(([side, list]) => ({
       name: `${FACTION_ICON[side]} ${capitalise(side)}`,
-      value: list.map((r) => `\`#${r.houseId}\` **${gold(r.min)}** · ${count(r.units)} listed`).join("\n").slice(0, 1024),
+      value: list.map((r) => `\`#${r.houseId}\` **${money(r.min)}** · ${count(r.units)} listed`).join("\n").slice(0, 1024),
       inline: false,
     }));
   }
@@ -205,10 +208,9 @@ async function priceCommand(options, env) {
     data: {
       embeds: [
         {
-          title: name,
+          author: { name, icon_url: info?.icon },
           color: QUALITY_COLORS[info?.quality] ?? 0xf2b84b,
-          thumbnail: info?.icon ? { url: info.icon } : undefined,
-          description: [info?.kind, `Cheapest: **${gold(cheapest.min)}** · ${cheapest.label}`].filter(Boolean).join("\n"),
+          description: [info?.kind, `Cheapest: **${money(cheapest.min)}** · ${cheapest.label}`].filter(Boolean).join("\n"),
           fields: fields.slice(0, 25),
           footer: { text: `Item ${id} · market = avg of cheapest 15% · scanned` },
           timestamp: new Date(meta.updated).toISOString(),
