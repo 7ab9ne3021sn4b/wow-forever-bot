@@ -7,6 +7,6 @@ compatibility_date = "2026-11-01"
 binding = "KV"
 id = "__KV_ID__"
 
-# Check the EU Normal + PvP rulesets every 2 minutes.
+# Every minute: keep the sticky message at the bottom; every 2nd minute: check the rulesets.
 [triggers]
-crons = ["*/2 * * * *"]
+crons = ["* * * * *"]
